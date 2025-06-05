@@ -138,94 +138,6 @@ function Export-PolicyDetail {
     return $policyInfo
 }
 
-####################################################
-
-<#
-            PolicyBaseTypeName.DeviceConfiguration,
-            PolicyBaseTypeName.DeviceManagementConfigurationPolicy,
-            PolicyBaseTypeName.DeviceConfigurationAdmxPolicy,
-            PolicyBaseTypeName.DeviceIntent
-
-            #>
-        #all-in-one function to get policy settings report based on PolicyBaseTypeName
-# This function retrieves policy settings report for a specific policy, device, and user.
-function Get-PolicySettingsReport {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$policyId,
-        [Parameter(Mandatory = $true)]
-        [string]$deviceId,
-        [Parameter(Mandatory = $true)]
-        [string]$userId,
-        [Parameter(Mandatory = $true)]
-        [string]$PolicyBaseTypeName
-    )
-
-    # Validate input
-    if (-not $policyId -or -not $deviceId -or -not $userId -or -not $PolicyBaseTypeName) {
-        Write-Error "All parameters are required."
-        return $null
-    }
-
-    # Define request bodies for different policy types
-    $jsonForOthers = @{
-        select = @(
-            "SettingName"
-            "SettingStatus"
-            "ErrorCode"
-            "SettingInstanceId"
-            "SettingInstancePath"
-        )
-        skip   = 0
-        top    = 50
-        filter = "(PolicyId eq '$policyId') and (DeviceId eq '$deviceId') and (UserId eq '$userId')"
-        orderBy = @()
-    } | ConvertTo-Json
-
-    $jsonForConfigurationSettingsReport = @{
-        select = @(
-            "SettingName"
-            "SettingStatus"
-            "ErrorCode"
-            "SettingId"
-            "SettingInstanceId"
-        )
-        skip   = 0
-        top    = 50
-        filter = "(PolicyId eq '$policyId') and (DeviceId eq '$deviceId') and (UserId eq '$userId')"
-        orderBy = @()
-    } | ConvertTo-Json
-
-    # Determine endpoint and body
-    switch ($PolicyBaseTypeName) {
-        "Microsoft.Management.Services.Api.DeviceConfiguration" {
-            $url = "beta/deviceManagement/reports/getConfigurationSettingNoncomplianceReport"
-            $json = $jsonForOthers
-        }
-        "DeviceConfigurationAdmxPolicy" {
-            $url = "beta/deviceManagement/reports/getGroupPolicySettingsDeviceSettingsReport"
-            $json = $jsonForOthers
-        }
-        "DeviceManagementConfigurationPolicy" {
-            $url = "beta/deviceManagement/reports/getConfigurationSettingsReport"
-            $json = $jsonForConfigurationSettingsReport
-        }
-        default {
-            Write-Error "Unsupported PolicyBaseTypeName: $PolicyBaseTypeName"
-            return $null
-        }
-    }
-
-    try {
-        $response = Invoke-MgGraphRequest -Uri $url -Method POST -Body $json
-        return  $response
-    }
-    catch {
-        Write-Error "Failed to retrieve policy settings: $_"
-        return $null
-    }
-}
 
 #######################################################################
 # Query PolicyBaseTypeName Microsoft.Management.Services.Api.DeviceConfiguration
@@ -240,7 +152,8 @@ function Get-ApiDeviceConfiguration {
         [Parameter(Mandatory = $true)]
         [string]$userId
     )
-
+`
+`
     $json =  @{
         select = @(
             "SettingName"
@@ -281,32 +194,44 @@ function Get-DeviceManagementConfigurationPolicy {
         [string]$userId
     )
 
-    $json =  @{
-        select = @(
-            "SettingName"
-            "SettingStatus"
-            "ErrorCode"
-            "SettingId"
-            "SettingInstanceId"
-        )
-        skip   = 0
-        top    = 50
-        filter = "(PolicyId eq '$policyId') and (DeviceId eq '$deviceId') and (UserId eq '$userId')"
-        orderBy = @()           
+    $allResults = @()
+    $skip = 0
+    $top = 50
+    do {
+        $json =  @{
+            select = @(
+                "SettingName"
+                "SettingStatus"
+                "ErrorCode"
+                "SettingId"
+                "SettingInstanceId"
+            )
+            skip   = $skip
+            top    = $top
+            filter = "(PolicyId eq '$policyId') and (DeviceId eq '$deviceId') and (UserId eq '$userId')"
+            orderBy = @()           
+        } | ConvertTo-Json
+        try {
+            $deviceInfo = Invoke-MgGraphRequest `
+                -Uri "beta/deviceManagement/reports/getConfigurationSettingsReport" `
+                -Method POST `
+                -Body $json
 
-    } | ConvertTo-Json
-    try {
-        $deviceInfo = Invoke-MgGraphRequest `
-            -Uri "beta/deviceManagement/reports/getConfigurationSettingsReport" `
-            -Method POST `
-            -Body $json
+            $jsonResult = $deviceInfo | ConvertFrom-Json
+            if ($null -ne $jsonResult.values) {
+                $allResults += $jsonResult.values
+            }
+            $count = if ($null -ne $jsonResult.values) { $jsonResult.values.Count } else { 0 }
+            $skip += $top
+        }
+        catch {
+            Write-Error "Failed to retrieve configuration policies report: $_"
+            break
+        }
+    } while ($count -eq $top)
 
-        return $deviceInfo
-    }
-    catch {
-        Write-Error "Failed to retrieve configuration policies report: $_"
-        return $null
-    }
+    # Return as a similar object as original for compatibility
+    return @{ values = $allResults }
 }
 #######################################################################
 #query PolicyBaseTypeName DeviceConfigurationAdmxPolicy
@@ -489,6 +414,27 @@ function Export-DeviceManagementConfigurationPolicySettingDetail(){
    
 
 }
+
+#######################################################################
+
+# Helper function to get colored HTML for policy/setting status
+function Get-StatusHtml {
+    param(
+        [string]$Status
+    )
+    switch ($Status) {
+        "Compliant"      { return "<span style='color: #228B22; font-weight: bold;'>$Status</span>" }
+        "Remediated"     { return "<span style='color: #228B22; font-weight: bold;'>$Status</span>" }
+        "Noncompliant"   { return "<span style='color: #d73a49; font-weight: bold;'>$Status</span>" }
+        "Error"          { return "<span style='color: #d73a49; font-weight: bold;'>$Status</span>" }
+        "Conflict"       { return "<span style='color: #e36209; font-weight: bold;'>$Status</span>" }
+        "Not applicable" { return "<span style='color: #6a737d;'>$Status</span>" }
+        "Unknown"        { return "<span style='color: #6a737d;'>$Status</span>" }
+        "InProgress"     { return "<span style='color: #005a9e;'>$Status</span>" }
+        default          { return "<span>$Status</span>" }
+    }
+}
+
 #######################################################################
 #main script starts here
 #Ensure the script is run with the necessary permissions   
@@ -518,25 +464,7 @@ if ([string]::IsNullOrWhiteSpace($DeviceId)) {
 # Collect all policy and setting info for HTML export
 $allPolicyHtmlBlocks = @()
 
-# Helper function to get colored HTML for policy/setting status
-function Get-StatusHtml {
-    param(
-        [string]$Status
-    )
-    switch ($Status) {
-        "Compliant"      { return "<span style='color: #228B22; font-weight: bold;'>$Status</span>" }
-        "Remediated"     { return "<span style='color: #228B22; font-weight: bold;'>$Status</span>" }
-        "Noncompliant"   { return "<span style='color: #d73a49; font-weight: bold;'>$Status</span>" }
-        "Error"          { return "<span style='color: #d73a49; font-weight: bold;'>$Status</span>" }
-        "Conflict"       { return "<span style='color: #e36209; font-weight: bold;'>$Status</span>" }
-        "Not applicable" { return "<span style='color: #6a737d;'>$Status</span>" }
-        "Unknown"        { return "<span style='color: #6a737d;'>$Status</span>" }
-        "InProgress"     { return "<span style='color: #005a9e;'>$Status</span>" }
-        default          { return "<span>$Status</span>" }
-    }
-}
-
-# Loop through each policy and retrieve settings
+# Loop through each configuration policies and retrieve settings
 foreach ($policy in $PolicyConfigurationresults) {
     $policyId = $policy.PolicyID
     $userId = $policy.UserID
@@ -550,8 +478,14 @@ foreach ($policy in $PolicyConfigurationresults) {
                 Export-policySettingDetail -PolicySettings $_
             }
         }
+        "Microsoft.Management.Services.Api.DeviceManagementIntent"{
+               $perPolicySettingResults = Get-ApiDeviceConfiguration -policyId $policyId -deviceId $DeviceId -userId $userId
+                $settings = $perPolicySettingResults.values | ForEach-Object {
+                Export-policySettingDetail -PolicySettings $_
+            }
+        }
         "DeviceManagementConfigurationPolicy" {
-            $perPolicySettingResults = Get-DeviceManagementConfigurationPolicy -policyId $policyId -deviceId $DeviceId -userId $userId | ConvertFrom-Json
+            $perPolicySettingResults = Get-DeviceManagementConfigurationPolicy -policyId $policyId -deviceId $DeviceId -userId $userId 
             $settings = $perPolicySettingResults.values | ForEach-Object {
                 Export-DeviceManagementConfigurationPolicySettingDetail -PolicySettings $_
             }
